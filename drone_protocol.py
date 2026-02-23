@@ -247,46 +247,92 @@ class DroneProtocol:
             time.sleep(HEARTBEAT_INTERVAL)
 
     def _receive_loop(self):
-        buf = bytearray()
+        # Set timeout once so recvfrom doesn't block forever,
+        # allowing the stop_event check to run periodically.
+        if self.control_socket:
+            self.control_socket.settimeout(1.0)
         while not self._stop_event.is_set():
             try:
                 if self.control_socket:
-                    data, _ = self.control_socket.recvfrom(1024)
-                    buf.extend(data)
-                    # Process all complete packets in the buffer
-                    while len(buf) >= 10:
-                        # Look for 0x66 header
-                        header_idx = -1
-                        for i in range(len(buf)):
-                            if buf[i] == 0x66:
-                                header_idx = i
-                                break
-                        if header_idx == -1:
-                            buf.clear()
-                            break
-                        # Discard bytes before header
-                        if header_idx > 0:
-                            del buf[:header_idx]
-                        # Try Format 2 (15 bytes): 0x66, 0x0F, ..., 0x99
-                        if len(buf) >= 15 and buf[1] == 0x0F and buf[14] == 0x99:
-                            self._parse_telemetry_format2(bytes(buf[:15]))
-                            del buf[:15]
-                            continue
-                        # Try Format 1 (10 bytes): 0x66, voltage (not 0x0F), ...
-                        if len(buf) >= 10 and buf[1] != 0x0F:
-                            self._parse_telemetry_format1(bytes(buf[:10]))
-                            del buf[:10]
-                            continue
-                        # Not enough data yet for either format; wait for more
-                        if len(buf) < 15:
-                            break
-                        # Unrecognized — skip this header byte and try again
-                        del buf[:1]
+                    data, _ = self.control_socket.recvfrom(2048)
+                    self.packets_received += 1
+
+                    if not data:
+                        continue
+
+                    # --- Filter out non-telemetry packets ---
+
+                    # Skip CMD responses (0xCC 0x5A prefix)
+                    if len(data) >= 2 and data[0] == 0xCC and data[1] == 0x5A:
+                        self._parse_cmd_response(data)
+                        continue
+
+                    # Skip heartbeat echo (single byte or very short)
+                    if len(data) < 5:
+                        continue
+
+                    # Skip control packet echoes (20 bytes, header 0x66, length 0x14, tail 0x99)
+                    if len(data) == CONTROL_LEN and data[0] == 0x66 and data[1] == 0x14 and data[19] == 0x99:
+                        continue
+
+                    # --- Process telemetry per-datagram (no cross-packet buffering) ---
+                    # UDP preserves message boundaries, so each recvfrom is one packet.
+                    # Scan within this single datagram for telemetry frames.
+                    self._parse_datagram(data)
+
+            except socket.timeout:
+                continue  # Normal — just re-check stop_event
             except OSError as e:
                 if platform.system() == "Windows" and getattr(e, 'winerror', None) == 10054:
                     pass
                 else:
                     time.sleep(1)  # Back off on errors, don't spam status
+
+    def _parse_datagram(self, data: bytes):
+        """Parse telemetry frames within a single UDP datagram."""
+        pos = 0
+        while pos < len(data):
+            # Find next 0x66 header
+            header_idx = -1
+            for i in range(pos, len(data)):
+                if data[i] == 0x66:
+                    header_idx = i
+                    break
+            if header_idx == -1:
+                break
+            pos = header_idx
+            remaining = len(data) - pos
+
+            # Try Format 2 first (15 bytes): 0x66, 0x0F, ..., 0x99
+            if remaining >= 15 and data[pos + 1] == 0x0F and data[pos + 14] == 0x99:
+                self._parse_telemetry_format2(data[pos:pos + 15])
+                pos += 15
+                continue
+
+            # Try Format 1 (10 bytes): 0x66, voltage byte (not 0x0F, not 0x14)
+            if remaining >= 10 and data[pos + 1] != 0x0F and data[pos + 1] != 0x14:
+                self._parse_telemetry_format1(data[pos:pos + 10])
+                pos += 10
+                continue
+
+            # Unrecognized 0x66 — skip it and keep scanning
+            pos += 1
+
+    def _parse_cmd_response(self, data: bytes):
+        """Parse CMD responses (SSID, firmware, etc.) from the drone."""
+        try:
+            if len(data) >= 7 and data[3] == 0xA2:
+                # SSID response
+                str_len = (data[4] & 0xFF) - 1
+                if len(data) >= 5 + str_len:
+                    self.telemetry.drone_ssid = data[5:5 + str_len].decode('utf-8', errors='ignore')
+            elif len(data) >= 7 and data[3] == 0x30:
+                # Firmware version response
+                str_len = (data[4] & 0xFF) - 1
+                if len(data) >= 5 + str_len:
+                    self.telemetry.firmware_ver = data[5:5 + str_len].decode('utf-8', errors='ignore')
+        except Exception:
+            pass
 
     def _parse_telemetry_format1(self, data: bytes):
         '''Parse 10-byte telemetry packet (Format 1).'''
