@@ -25,6 +25,7 @@ import io
 import os
 import sys
 import csv
+import math
 from datetime import datetime
 from collections import deque
 
@@ -272,6 +273,11 @@ class X80HUDApp:
         self.status_clear_time = 0
         self.photo_count = 0
 
+        # Dead-reckoning position (metres from home)
+        self.drone_x = 0.0   # east  (+) / west  (-)
+        self.drone_y = 0.0   # north (+) / south (-)
+        self._pos_last_t = 0.0
+
         # Photo dir
         self.photo_dir = os.path.join(APP_DIR, "photos")
         os.makedirs(self.photo_dir, exist_ok=True)
@@ -298,6 +304,7 @@ class X80HUDApp:
         # Bind events
         self.root.bind("<KeyPress>", self._on_key_press)
         self.root.bind("<KeyRelease>", self._on_key_release)
+        self.video_label.bind("<Button-1>", self._on_click)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self.root.focus_set()
 
@@ -332,6 +339,9 @@ class X80HUDApp:
         def do_connect():
             try:
                 self.drone.connect()
+                self.drone_x = 0.0
+                self.drone_y = 0.0
+                self._pos_last_t = 0.0
                 self.root.after(100, lambda: self._set_status("CONNECTED", "#00ff41"))
                 self.root.after(200, self._start_video)
                 self.logger.start()
@@ -393,6 +403,9 @@ class X80HUDApp:
         # One-shot commands
         if sym.lower() == "t":
             self.drone.takeoff()
+            self.drone_x = 0.0
+            self.drone_y = 0.0
+            self._pos_last_t = 0.0
             self._set_status("TAKEOFF", "#00ff41")
         elif sym.lower() == "l":
             self.drone.land()
@@ -493,6 +506,9 @@ class X80HUDApp:
             self.drone.flight_state.pitch = int(self.stick_state["pitch"])
             self.drone.flight_state.throttle = int(self.stick_state["throttle"])
             self.drone.flight_state.yaw = int(self.stick_state["yaw"])
+
+        # Update position estimate
+        self._update_position()
 
         # Log
         if self.logger.logging:
@@ -654,6 +670,8 @@ class X80HUDApp:
                 "status_color": self.status_color,
                 "tx": getattr(self.drone, "packets_sent", 0),
                 "rx": getattr(self.drone, "packets_received", 0),
+                "drone_x": self.drone_x,
+                "drone_y": self.drone_y,
             }
 
             frame = self.hud.render(frame, telemetry_dict, flight_state_dict, app_state)
@@ -729,6 +747,62 @@ class X80HUDApp:
         pattern = factory()
         self.autopilot.start(pattern)
         self._set_status(f"AUTOPILOT: {name.upper()}", "#00d4ff")
+
+    # ── Position Tracking (dead-reckoning) ────────────────────────────
+
+    def _update_position(self):
+        """Estimate drone position from stick inputs and heading (50 Hz)."""
+        now = time.time()
+        if self._pos_last_t == 0.0:
+            self._pos_last_t = now
+            return
+        dt = now - self._pos_last_t
+        self._pos_last_t = now
+
+        if not self.drone.telemetry.is_flying:
+            return
+
+        pitch = self.stick_state["pitch"]  # -100 = forward, +100 = backward
+        roll  = self.stick_state["roll"]   # -100 = left,    +100 = right
+        heading_rad = math.radians(self.drone.telemetry.heading)
+
+        speed_scale = 4.0  # m/s at full stick deflection
+        fwd   = -pitch / 100 * speed_scale
+        right =  roll  / 100 * speed_scale
+
+        # Decompose into world-frame north/east
+        self.drone_x += (fwd * math.sin(heading_rad) + right * math.cos(heading_rad)) * dt
+        self.drone_y += (fwd * math.cos(heading_rad) - right * math.sin(heading_rad)) * dt
+
+    # ── HUD Button Click Handler ───────────────────────────────────────
+
+    def _on_click(self, event):
+        """Route a mouse click to a HUD button action if one was hit."""
+        if self.show_help:
+            return  # clicks pass through to dismiss help via key only
+        x, y = event.x, event.y
+        for action, (x0, y0, x1, y1) in self.hud.button_regions.items():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                self._handle_button_action(action)
+                return
+
+    def _handle_button_action(self, action):
+        """Execute the drone command corresponding to a clicked HUD button."""
+        if action == "calibrate":
+            self.drone.calibrate()
+            self._set_status("CALIBRATING GYRO", "#00d4ff")
+        elif action == "cam_up":
+            self.drone.camera_up()
+            self.root.after(300, self.drone.camera_stop)
+            self._set_status("CAMERA UP", "#00d4ff")
+        elif action == "cam_down":
+            self.drone.camera_down()
+            self.root.after(300, self.drone.camera_stop)
+            self._set_status("CAMERA DOWN", "#00d4ff")
+        elif action == "photo":
+            self._take_photo()
+        elif action == "record":
+            self._toggle_recording()
 
     # ── Status ────────────────────────────────────────────────────────
 
