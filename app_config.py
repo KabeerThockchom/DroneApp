@@ -84,8 +84,8 @@ KEYBOARD_MAP: Dict[str, List[Tuple[str, str]]] = {
         ("V", "Toggle Video Stream"),
         ("P", "Take Photo"),
         ("R", "Start/Stop Recording"),
-        ("Prior", "Tilt Camera Up"), # Page Up
-        ("Next", "Tilt Camera Down")   # Page Down
+        ("PgUp / ,", "Tilt Camera Up"),
+        ("PgDn / .", "Tilt Camera Down")
     ],
     "Settings": [
         ("1", "Set Speed to Low"),
@@ -100,10 +100,10 @@ KEYBOARD_MAP: Dict[str, List[Tuple[str, str]]] = {
         ("Y", "Toggle Timelapse"),
         ("?", "Show Help / Keyboard Map"),
         ("Q", "Quit Application"),
-        ("F11", "Toggle Fullscreen")
+        ("F11 / Ctrl+F", "Toggle Fullscreen")
     ],
     "Position": [
-        ("Home", "Reset Home Position"),
+        ("Home / N", "Reset Home Position"),
     ],
     "Autopilot": [
         ("Control-1", "Execute Pattern 1 (Orbit)"),

@@ -407,17 +407,20 @@ class X80HUDApp:
                 self.keys_down.add(sym)
             return
 
-        # Camera tilt (held)
-        if sym == "Prior":  # PageUp
+        # Camera tilt (held) — PgUp/PgDn or ,/. for MacBook
+        if sym in ("Prior", "comma"):
             self.drone.camera_up()
             return
-        if sym == "Next":  # PageDown
+        if sym in ("Next", "period"):
             self.drone.camera_down()
             return
 
-        # Autopilot patterns (Ctrl+number)
+        # Ctrl shortcuts
         if ctrl_held and sym in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"):
             self._start_autopilot_by_index(int(sym) if sym != "0" else 10)
+            return
+        if ctrl_held and sym.lower() == "f":
+            self._toggle_fullscreen()
             return
 
         # One-shot commands
@@ -469,7 +472,7 @@ class X80HUDApp:
             if self.autopilot.active:
                 self.autopilot.stop()
                 self._set_status("AUTOPILOT STOPPED", "#ffaa00")
-        elif sym == "Home":
+        elif sym == "Home" or sym.lower() == "n":
             self.position_tracker.reset_home()
             self._set_status("HOME POSITION RESET", "#00ff41")
         elif sym.lower() == "b":
@@ -504,7 +507,7 @@ class X80HUDApp:
             self.keys_down.discard(sym.lower())
         elif sym in ("Up", "Down", "Left", "Right"):
             self.keys_down.discard(sym)
-        elif sym in ("Prior", "Next"):
+        elif sym in ("Prior", "Next", "comma", "period"):
             self.drone.camera_stop()
 
     # ── Mouse Click Handling ─────────────────────────────────────────

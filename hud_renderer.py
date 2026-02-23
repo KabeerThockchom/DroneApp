@@ -594,6 +594,11 @@ class HUDRenderer:
             ("Down", "Pitch Backward"),
             ("Left", "Roll Left (Strafe)"),
             ("Right", "Roll Right (Strafe)"),
+            ("", ""),
+            ("", "-- CAMERA --"),
+            (", / .", "Tilt Camera Up/Down"),
+            ("B", "Switch Camera"),
+            ("G", "Rotate Camera 180"),
         ]
 
         controls_right = [
@@ -603,21 +608,19 @@ class HUDRenderer:
             ("SPACE", "Emergency Stop"),
             ("C", "Calibrate + Reset Home"),
             ("X", "Flip"),
-            ("Home", "Reset Home Position"),
+            ("N", "Reset Home Position"),
             ("", ""),
             ("", "-- SETTINGS --"),
             ("1/2/3", "Speed Low/Med/High"),
+            ("I", "Toggle Indoor Mode"),
             ("H", "Toggle Headless"),
             ("F", "Toggle Lights"),
             ("V", "Toggle Video"),
             ("P", "Take Photo"),
             ("R", "Record Video"),
-            ("B", "Switch Camera"),
-            ("G", "Rotate Camera 180"),
             ("Y", "Toggle Timelapse"),
-            ("I", "Toggle Indoor Mode"),
             ("Tab", "Toggle HUD"),
-            ("F11", "Fullscreen"),
+            ("Ctrl+F", "Fullscreen"),
             ("Q", "Quit"),
         ]
 
