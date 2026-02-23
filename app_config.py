@@ -25,6 +25,11 @@ class AppConfig:
     auto_land_battery: int = 10
     default_speed: int = 2
     fullscreen: bool = True
+    geofence_radius: float = 50.0
+    geofence_warning_radius: float = 45.0
+    max_drone_speed: float = 5.0
+    show_minimap: bool = True
+    show_hud_buttons: bool = True
 
     def save(self, file_path: str = "config.json") -> None:
         """Saves the current configuration to a JSON file."""
@@ -89,6 +94,9 @@ KEYBOARD_MAP: Dict[str, List[Tuple[str, str]]] = {
         ("?", "Show Help / Keyboard Map"),
         ("Q", "Quit Application"),
         ("F11", "Toggle Fullscreen")
+    ],
+    "Position": [
+        ("Home", "Reset Home Position"),
     ],
     "Autopilot": [
         ("Control-1", "Execute Pattern 1 (Orbit)"),

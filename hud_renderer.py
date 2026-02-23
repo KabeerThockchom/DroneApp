@@ -3,6 +3,7 @@ Military-style HUD renderer for the Pallton X80 Drone Controller.
 Draws all overlay elements on top of the live video feed.
 """
 import math
+import time
 from PIL import Image, ImageDraw, ImageFont
 
 
@@ -23,6 +24,9 @@ class HUDRenderer:
         self.font_medium = self._get_font(18)
         self.font_large = self._get_font(24)
         self.font_xl = self._get_font(32)
+
+        # Bounding boxes for clickable HUD buttons: {name: (x0, y0, x1, y1)}
+        self.button_rects = {}
 
     def _get_font(self, size):
         """Load a monospace font, with fallbacks."""
@@ -106,6 +110,18 @@ class HUDRenderer:
             self._draw_autopilot_indicator(draw, w, h,
                                             app_state.get("autopilot_label", "--"),
                                             app_state.get("autopilot_progress", 0))
+
+        # HUD buttons (clickable)
+        if app_state.get("show_hud_buttons", True):
+            self._draw_hud_buttons(draw, w, h)
+
+        # Mini-map
+        if app_state.get("show_minimap", True):
+            self._draw_minimap(draw, w, h, app_state)
+
+        # Geofence breach border
+        if app_state.get("beyond_geofence", False):
+            self._draw_geofence_border(draw, w, h)
 
         # Help overlay
         if app_state.get("show_help", False):
@@ -374,6 +390,166 @@ class HUDRenderer:
                          (w / 2 - bar_w / 2 + bar_w * progress, bar_y + 5)],
                        fill=self.info_color)
 
+    # ── HUD Buttons ────────────────────────────────────────────────────
+
+    def _draw_hud_buttons(self, draw, w, h):
+        """Draw clickable HUD buttons on the right side below mode indicators."""
+        self.button_rects.clear()
+
+        btn_w, btn_h = 100, 28
+        x = w - 160
+        y_start = 120  # Below mode indicators
+        spacing = 36
+
+        buttons = [
+            ("CALIBRATE", "calibrate"),
+            ("CAM UP", "cam_up"),
+            ("CAM DN", "cam_dn"),
+            ("HOME RST", "home_rst"),
+        ]
+
+        for i, (label, action) in enumerate(buttons):
+            y = y_start + i * spacing
+            x0, y0 = x, y
+            x1, y1 = x + btn_w, y + btn_h
+
+            # Semi-transparent background
+            draw.rectangle([(x0, y0), (x1, y1)], fill=(0, 0, 0, 100))
+
+            # Border with corner accents
+            draw.rectangle([(x0, y0), (x1, y1)], outline=self.primary_color, width=1)
+
+            # Corner accents (military HUD style)
+            accent = 6
+            for cx, cy in [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]:
+                dx = accent if cx == x0 else -accent
+                dy = accent if cy == y0 else -accent
+                draw.line([(cx, cy), (cx + dx, cy)], fill=self.primary_color, width=2)
+                draw.line([(cx, cy), (cx, cy + dy)], fill=self.primary_color, width=2)
+
+            # Label text centered
+            tw, th = self._text_size(self.font_small, label)
+            tx = x0 + (btn_w - tw) // 2
+            ty = y0 + (btn_h - th) // 2
+            draw.text((tx, ty), label, fill=self.primary_color, font=self.font_small)
+
+            # Register bounding box for click detection
+            self.button_rects[action] = (x0, y0, x1, y1)
+
+    # ── Mini-Map ───────────────────────────────────────────────────────
+
+    def _draw_minimap(self, draw, w, h, app_state):
+        """Draw circular radar-style mini-map with position and geofence."""
+        radius = 80
+        cx = w - radius - 30
+        cy = h - radius - 80  # Above stick indicators
+
+        pos_x = app_state.get("pos_x", 0.0)
+        pos_y = app_state.get("pos_y", 0.0)
+        distance = app_state.get("pos_distance", 0.0)
+        heading = app_state.get("heading", 0.0)
+        geofence_r = app_state.get("geofence_radius", 50.0)
+        at_fence = app_state.get("at_geofence", False)
+        beyond_fence = app_state.get("beyond_geofence", False)
+
+        # Background circle
+        draw.ellipse(
+            [(cx - radius, cy - radius), (cx + radius, cy + radius)],
+            fill=(0, 0, 0, 120)
+        )
+
+        # Boundary color based on geofence status
+        if beyond_fence:
+            ring_color = self.danger_color
+        elif at_fence:
+            ring_color = self.warning_color
+        else:
+            ring_color = self.primary_color
+
+        # 50m boundary circle (outer)
+        draw.ellipse(
+            [(cx - radius, cy - radius), (cx + radius, cy + radius)],
+            outline=ring_color, width=2
+        )
+
+        # 25m inner ring (half radius)
+        inner_r = radius // 2
+        draw.ellipse(
+            [(cx - inner_r, cy - inner_r), (cx + inner_r, cy + inner_r)],
+            outline=(ring_color[0], ring_color[1], ring_color[2], 100), width=1
+        )
+
+        # Crosshair lines through center
+        draw.line([(cx - radius, cy), (cx + radius, cy)],
+                  fill=(ring_color[0], ring_color[1], ring_color[2], 60), width=1)
+        draw.line([(cx, cy - radius), (cx, cy + radius)],
+                  fill=(ring_color[0], ring_color[1], ring_color[2], 60), width=1)
+
+        # Home marker "H" at center
+        tw, th = self._text_size(self.font_small, "H")
+        draw.text((cx - tw // 2, cy - th // 2), "H",
+                  fill=self.info_color, font=self.font_small)
+
+        # Cardinal direction labels
+        for label, dx, dy in [("N", 0, -radius + 5), ("S", 0, radius - 15),
+                               ("E", radius - 12, -5), ("W", -radius + 3, -5)]:
+            lw, _ = self._text_size(self.font_small, label)
+            draw.text((cx + dx - lw // 2, cy + dy), label,
+                      fill=ring_color, font=self.font_small)
+
+        # Drone position as triangle pointing in heading direction
+        if geofence_r > 0:
+            # Scale: map geofence_radius meters to the radar circle radius
+            scale = radius / geofence_r
+            drone_px = cx + pos_x * scale
+            drone_py = cy - pos_y * scale  # Y inverted (screen coords)
+
+            # Clamp within circle
+            dx = drone_px - cx
+            dy = drone_py - cy
+            dist_px = math.sqrt(dx * dx + dy * dy)
+            if dist_px > radius - 5:
+                drone_px = cx + dx / dist_px * (radius - 5)
+                drone_py = cy + dy / dist_px * (radius - 5)
+
+            # Triangle pointing in heading direction
+            heading_rad = math.radians(heading)
+            tri_size = 6
+            tip_x = drone_px + math.sin(heading_rad) * tri_size
+            tip_y = drone_py - math.cos(heading_rad) * tri_size
+            left_x = drone_px + math.sin(heading_rad - 2.4) * tri_size * 0.7
+            left_y = drone_py - math.cos(heading_rad - 2.4) * tri_size * 0.7
+            right_x = drone_px + math.sin(heading_rad + 2.4) * tri_size * 0.7
+            right_y = drone_py - math.cos(heading_rad + 2.4) * tri_size * 0.7
+
+            draw.polygon(
+                [(tip_x, tip_y), (left_x, left_y), (right_x, right_y)],
+                fill=self.info_color
+            )
+
+        # Distance readout below
+        dist_text = f"{distance:.1f}m"
+        tw, _ = self._text_size(self.font_small, dist_text)
+        draw.text((cx - tw // 2, cy + radius + 4), dist_text,
+                  fill=ring_color, font=self.font_small)
+
+    # ── Geofence Breach Border ─────────────────────────────────────────
+
+    def _draw_geofence_border(self, draw, w, h):
+        """Pulsing red border when beyond geofence."""
+        pulse = int(time.time() * 3) % 2 == 0
+        if pulse:
+            border_w = 4
+            color = self.danger_color
+            # Top
+            draw.rectangle([(0, 0), (w, border_w)], fill=color)
+            # Bottom
+            draw.rectangle([(0, h - border_w), (w, h)], fill=color)
+            # Left
+            draw.rectangle([(0, 0), (border_w, h)], fill=color)
+            # Right
+            draw.rectangle([(w - border_w, 0), (w, h)], fill=color)
+
     # ── Help Overlay ──────────────────────────────────────────────────
 
     def _draw_help_overlay(self, draw, w, h):
@@ -410,8 +586,9 @@ class HUDRenderer:
             ("T", "Takeoff"),
             ("L", "Land"),
             ("SPACE", "Emergency Stop"),
-            ("C", "Calibrate Gyro"),
+            ("C", "Calibrate + Reset Home"),
             ("X", "Flip"),
+            ("Home", "Reset Home Position"),
             ("", ""),
             ("", "-- SETTINGS --"),
             ("1/2/3", "Speed Low/Med/High"),
@@ -451,7 +628,7 @@ class HUDRenderer:
 
     def _draw_disconnected(self, draw, w, h):
         """Pulsing disconnected warning."""
-        pulse = int(time.time() * 2) % 2 == 0 if 'time' in dir() else True
+        pulse = int(time.time() * 2) % 2 == 0
         if pulse:
             tw, th = self._text_size(self.font_xl, "DISCONNECTED")
             x = (w - tw) // 2

@@ -35,15 +35,18 @@ from drone_protocol import DroneProtocol, Telemetry, FlightState
 from hud_renderer import HUDRenderer
 from autopilot import Autopilot, FlightPattern
 from app_config import AppConfig, KEYBOARD_MAP, STICK_LAYOUT
+from position_tracker import PositionTracker
 
 # Try importing pygame for gamepad
-try:
-    import os
-    os.environ["SDL_VIDEODRIVER"] = "dummy"
-    import pygame
-    PYGAME_AVAILABLE = True
-except ImportError:
-    PYGAME_AVAILABLE = False
+# NOTE: pygame import is guarded — SDL may abort on incompatible macOS versions.
+PYGAME_AVAILABLE = False
+if os.environ.get("DRONE_ENABLE_GAMEPAD"):
+    try:
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        import pygame
+        PYGAME_AVAILABLE = True
+    except Exception:
+        PYGAME_AVAILABLE = False
 
 APP_NAME = "X80 DRONE HUD"
 APP_VERSION = "3.0.0"
@@ -70,15 +73,16 @@ class FlightLogger:
         self.writer.writerow([
             "timestamp", "battery", "altitude", "heading",
             "roll", "pitch", "throttle", "yaw",
-            "speed", "headless", "is_flying"
+            "speed", "headless", "is_flying",
+            "pos_x", "pos_y", "distance_home"
         ])
         self.logging = True
 
-    def log(self, telemetry, state, sticks):
+    def log(self, telemetry, state, sticks, position=None):
         if not self.logging or not self.writer:
             return
         try:
-            self.writer.writerow([
+            row = [
                 datetime.now().isoformat(),
                 telemetry.battery_pct,
                 telemetry.altitude,
@@ -87,7 +91,16 @@ class FlightLogger:
                 sticks["throttle"], sticks["yaw"],
                 state.speed, state.headless,
                 telemetry.is_flying,
-            ])
+            ]
+            if position:
+                row.extend([
+                    f"{position.x:.2f}",
+                    f"{position.y:.2f}",
+                    f"{position.distance:.2f}",
+                ])
+            else:
+                row.extend([0, 0, 0])
+            self.writer.writerow(row)
         except Exception:
             pass
 
@@ -244,6 +257,13 @@ class X80HUDApp:
         self.recorder = VideoRecorder()
         self.gamepad = GamepadHandler()
 
+        # Position tracker (dead-reckoning)
+        self.position_tracker = PositionTracker(
+            max_speed=self.config.max_drone_speed,
+            geofence_radius=self.config.geofence_radius,
+            geofence_warning_radius=self.config.geofence_warning_radius,
+        )
+
         # Autopilot — uses a dict for drone_state so it can write stick values
         self.stick_state = {"roll": 0, "pitch": 0, "throttle": 0, "yaw": 0}
         self.autopilot = Autopilot(self.stick_state)
@@ -298,6 +318,7 @@ class X80HUDApp:
         # Bind events
         self.root.bind("<KeyPress>", self._on_key_press)
         self.root.bind("<KeyRelease>", self._on_key_release)
+        self.video_label.bind("<Button-1>", self._on_mouse_click)
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
         self.root.focus_set()
 
@@ -402,7 +423,8 @@ class X80HUDApp:
             self._set_status("EMERGENCY STOP", "#ff0033", 5)
         elif sym.lower() == "c":
             self.drone.calibrate()
-            self._set_status("CALIBRATING GYRO", "#00d4ff")
+            self.position_tracker.reset_home()
+            self._set_status("CALIBRATING GYRO + HOME RESET", "#00d4ff")
         elif sym.lower() == "x":
             self.drone.flip()
             self._set_status("FLIP", "#00d4ff")
@@ -438,6 +460,9 @@ class X80HUDApp:
             if self.autopilot.active:
                 self.autopilot.stop()
                 self._set_status("AUTOPILOT STOPPED", "#ffaa00")
+        elif sym == "Home":
+            self.position_tracker.reset_home()
+            self._set_status("HOME POSITION RESET", "#00ff41")
         elif sym.lower() == "q":
             self._quit()
 
@@ -451,6 +476,34 @@ class X80HUDApp:
             self.keys_down.discard(sym)
         elif sym in ("Prior", "Next"):
             self.drone.camera_stop()
+
+    # ── Mouse Click Handling ─────────────────────────────────────────
+
+    def _on_mouse_click(self, event):
+        """Hit-test against HUD button bounding boxes."""
+        x, y = event.x, event.y
+        for action, (x0, y0, x1, y1) in self.hud.button_rects.items():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                self._handle_hud_button(action)
+                return
+
+    def _handle_hud_button(self, action):
+        """Dispatch HUD button actions."""
+        if action == "calibrate":
+            self.drone.calibrate()
+            self.position_tracker.reset_home()
+            self._set_status("CALIBRATING + HOME RESET", "#00d4ff")
+        elif action == "cam_up":
+            self.drone.camera_up()
+            self._set_status("CAMERA UP", "#00d4ff")
+            self.root.after(300, self.drone.camera_stop)
+        elif action == "cam_dn":
+            self.drone.camera_down()
+            self._set_status("CAMERA DOWN", "#00d4ff")
+            self.root.after(300, self.drone.camera_stop)
+        elif action == "home_rst":
+            self.position_tracker.reset_home()
+            self._set_status("HOME POSITION RESET", "#00ff41")
 
     # ── Control Update Loop ───────────────────────────────────────────
 
@@ -494,9 +547,27 @@ class X80HUDApp:
             self.drone.flight_state.throttle = int(self.stick_state["throttle"])
             self.drone.flight_state.yaw = int(self.stick_state["yaw"])
 
+        # Update position tracker
+        self.position_tracker.update(
+            pitch=self.stick_state["pitch"],
+            roll=self.stick_state["roll"],
+            heading=self.drone.telemetry.heading,
+            speed_mode=self.drone.speed_name,
+            is_flying=self.drone.telemetry.is_flying,
+        )
+
+        # Geofence warnings
+        if self.position_tracker.beyond_geofence:
+            if not self.status_text or "GEOFENCE" not in self.status_text:
+                self._set_status("GEOFENCE BREACH — RETURN TO HOME", "#ff0033", 2)
+        elif self.position_tracker.at_geofence:
+            if not self.status_text or "GEOFENCE" not in self.status_text:
+                self._set_status("GEOFENCE WARNING — APPROACHING LIMIT", "#ffaa00", 2)
+
         # Log
         if self.logger.logging:
-            self.logger.log(self.drone.telemetry, self.drone.flight_state, self.stick_state)
+            self.logger.log(self.drone.telemetry, self.drone.flight_state,
+                            self.stick_state, self.position_tracker.position)
 
         # Safety: low battery auto-land
         bat = self.drone.telemetry.battery_pct
@@ -639,6 +710,9 @@ class X80HUDApp:
                 "flight_time": t.flight_time if t.flight_time else self.drone.uptime,
             }
 
+            # Position data
+            pos = self.position_tracker.position
+
             # App state dict
             app_state = {
                 "fps": int(self.fps),
@@ -654,6 +728,17 @@ class X80HUDApp:
                 "status_color": self.status_color,
                 "tx": getattr(self.drone, "packets_sent", 0),
                 "rx": getattr(self.drone, "packets_received", 0),
+                # Position / geofence data
+                "pos_x": pos.x,
+                "pos_y": pos.y,
+                "pos_distance": pos.distance,
+                "pos_bearing": pos.bearing,
+                "heading": t.heading,
+                "at_geofence": self.position_tracker.at_geofence,
+                "beyond_geofence": self.position_tracker.beyond_geofence,
+                "geofence_radius": self.config.geofence_radius,
+                "show_minimap": self.config.show_minimap,
+                "show_hud_buttons": self.config.show_hud_buttons,
             }
 
             frame = self.hud.render(frame, telemetry_dict, flight_state_dict, app_state)
