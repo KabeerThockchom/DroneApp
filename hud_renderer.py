@@ -24,6 +24,9 @@ class HUDRenderer:
         self.font_large = self._get_font(24)
         self.font_xl = self._get_font(32)
 
+        # Clickable button regions, populated each render frame
+        self.button_regions = {}  # action_name -> (x0, y0, x1, y1)
+
     def _get_font(self, size):
         """Load a monospace font, with fallbacks."""
         for name in ("consola.ttf", "cour.ttf", "DejaVuSansMono.ttf",
@@ -107,7 +110,15 @@ class HUDRenderer:
                                             app_state.get("autopilot_label", "--"),
                                             app_state.get("autopilot_progress", 0))
 
-        # Help overlay
+        # Action buttons (clickable)
+        self._draw_action_buttons(draw, w, h, app_state.get("recording", False))
+
+        # Mini-map with 50 m range limit
+        self._draw_minimap(draw, w, h,
+                           app_state.get("drone_x", 0.0),
+                           app_state.get("drone_y", 0.0))
+
+        # Help overlay (drawn last so it sits on top of buttons/map)
         if app_state.get("show_help", False):
             self._draw_help_overlay(draw, w, h)
 
@@ -373,6 +384,107 @@ class HUDRenderer:
         draw.rectangle([(w / 2 - bar_w / 2, bar_y),
                          (w / 2 - bar_w / 2 + bar_w * progress, bar_y + 5)],
                        fill=self.info_color)
+
+    # ── Action Buttons ────────────────────────────────────────────────
+
+    def _draw_action_buttons(self, draw, w, h, recording=False):
+        """Draw a row of clickable action buttons centered at the bottom."""
+        buttons = [
+            ("CALIBRATE", "calibrate", self.primary_color, False),
+            ("CAM \u25b2",   "cam_up",    self.primary_color, False),
+            ("CAM \u25bc",   "cam_down",  self.primary_color, False),
+            ("PHOTO",       "photo",     self.info_color,    False),
+            ("\u25cf REC",  "record",    self.danger_color,  recording),
+        ]
+
+        btn_w, btn_h = 90, 28
+        gap = 8
+        total_w = len(buttons) * btn_w + (len(buttons) - 1) * gap
+        x_start = (w - total_w) // 2
+        y0 = h - 280
+        y1 = y0 + btn_h
+
+        self.button_regions = {}
+        for i, (label, action, color, active) in enumerate(buttons):
+            bx0 = x_start + i * (btn_w + gap)
+            bx1 = bx0 + btn_w
+            bg = (80, 0, 0, 210) if active else (0, 0, 0, 190)
+            draw.rectangle([(bx0, y0), (bx1, y1)], fill=bg, outline=color, width=1)
+            tw, th = self._text_size(self.font_small, label)
+            draw.text((bx0 + (btn_w - tw) // 2, y0 + (btn_h - th) // 2),
+                      label, fill=color, font=self.font_small)
+            self.button_regions[action] = (bx0, y0, bx1, y1)
+
+    # ── Mini-Map ──────────────────────────────────────────────────────
+
+    def _draw_minimap(self, draw, w, h, drone_x, drone_y):
+        """Draw a dead-reckoning mini-map centered between stick indicators."""
+        MAP_W, MAP_H = 140, 140
+        SCALE = 1.3          # px per metre  →  50 m = 65 px radius
+        LIMIT_M = 50.0
+
+        mx0 = (w - MAP_W) // 2
+        my0 = h - 240        # sits above the action buttons (at h-280)
+        mx1 = mx0 + MAP_W
+        my1 = my0 + MAP_H
+        cx = mx0 + MAP_W // 2
+        cy = my0 + MAP_H // 2
+
+        distance = math.sqrt(drone_x ** 2 + drone_y ** 2)
+
+        # Panel
+        draw.rectangle([(mx0, my0), (mx1, my1)],
+                       fill=(0, 0, 0, 200), outline=self.primary_color, width=1)
+
+        # Faint grid
+        for i in range(1, 4):
+            gx = mx0 + i * MAP_W // 4
+            gy = my0 + i * MAP_H // 4
+            draw.line([(gx, my0 + 1), (gx, my1 - 1)], fill=(0, 255, 65, 35), width=1)
+            draw.line([(mx0 + 1, gy), (mx1 - 1, gy)], fill=(0, 255, 65, 35), width=1)
+
+        # 40 m advisory ring (amber)
+        r40 = int(40 * SCALE)
+        draw.ellipse([(cx - r40, cy - r40), (cx + r40, cy + r40)],
+                     outline=self.warning_color, width=1)
+
+        # 50 m hard limit ring
+        r50 = int(LIMIT_M * SCALE)
+        limit_col = self.danger_color if distance > LIMIT_M else self.primary_color
+        draw.ellipse([(cx - r50, cy - r50), (cx + r50, cy + r50)],
+                     outline=limit_col, width=2)
+
+        # Home cross
+        draw.line([(cx - 5, cy), (cx + 5, cy)], fill=self.warning_color, width=2)
+        draw.line([(cx, cy - 5), (cx, cy + 5)], fill=self.warning_color, width=2)
+
+        # Drone dot
+        px = int(cx + drone_x * SCALE)
+        py = int(cy - drone_y * SCALE)   # north = up = lower screen y
+        px = max(mx0 + 4, min(mx1 - 4, px))
+        py = max(my0 + 4, min(my1 - 4, py))
+        draw.line([(cx, cy), (px, py)], fill=(0, 212, 255, 160), width=1)
+        draw.ellipse([(px - 4, py - 4), (px + 4, py + 4)],
+                     fill=self.info_color, outline=(255, 255, 255, 255))
+
+        # Header: label + live distance readout
+        range_col = (self.danger_color if distance > LIMIT_M
+                     else self.warning_color if distance > 40
+                     else self.primary_color)
+        draw.text((mx0 + 4, my0 + 3), "MAP", fill=self.primary_color, font=self.font_small)
+        draw.text((mx0 + 36, my0 + 3), f"{distance:.1f}m",
+                  fill=range_col, font=self.font_small)
+        draw.text((mx1 - 38, my0 + 3), "50m lim", fill=self.primary_color, font=self.font_small)
+
+        # Warning banner above the map when close to / beyond limit
+        if distance > 40:
+            warn = "!! OUT OF RANGE !!" if distance > LIMIT_M else f"RANGE WARN  {distance:.0f}m"
+            col  = self.danger_color if distance > LIMIT_M else self.warning_color
+            tw, th = self._text_size(self.font_medium, warn)
+            wx, wy = (w - tw) // 2, my0 - th - 8
+            draw.rectangle([(wx - 10, wy - 4), (wx + tw + 10, wy + th + 4)],
+                           fill=(0, 0, 0, 210))
+            draw.text((wx, wy), warn, fill=col, font=self.font_medium)
 
     # ── Help Overlay ──────────────────────────────────────────────────
 
