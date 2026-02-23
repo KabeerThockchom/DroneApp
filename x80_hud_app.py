@@ -292,6 +292,15 @@ class X80HUDApp:
         self.status_clear_time = 0
         self.photo_count = 0
 
+        # Timelapse state
+        self.timelapse_active = False
+        self.timelapse_last_photo = 0
+        self.timelapse_count = 0
+        self.camera_rotated = False
+
+        # Indoor mode
+        self.indoor_mode = self.config.indoor_mode
+
         # Photo dir
         self.photo_dir = os.path.join(APP_DIR, "photos")
         os.makedirs(self.photo_dir, exist_ok=True)
@@ -463,6 +472,27 @@ class X80HUDApp:
         elif sym == "Home":
             self.position_tracker.reset_home()
             self._set_status("HOME POSITION RESET", "#00ff41")
+        elif sym.lower() == "b":
+            self.drone.switch_camera()
+            self._set_status("SWITCHING CAMERA", "#00d4ff")
+        elif sym.lower() == "g":
+            self.camera_rotated = not self.camera_rotated
+            self.drone.camera_rotate(self.camera_rotated)
+            self._set_status(f"CAMERA ROTATE {'ON' if self.camera_rotated else 'OFF'}", "#00d4ff")
+        elif sym.lower() == "y":
+            self.timelapse_active = not self.timelapse_active
+            if self.timelapse_active:
+                self.timelapse_count = 0
+                self.timelapse_last_photo = 0
+                self._set_status("TIMELAPSE STARTED", "#00ff41")
+            else:
+                self._set_status(f"TIMELAPSE STOPPED [{self.timelapse_count} photos]", "#ffaa00")
+        elif sym.lower() == "i":
+            self.indoor_mode = not self.indoor_mode
+            mode = "ON" if self.indoor_mode else "OFF"
+            if self.indoor_mode:
+                self.drone.set_speed(0.2)  # Force LOW speed indoors
+            self._set_status(f"INDOOR MODE {mode}", "#00d4ff" if self.indoor_mode else "#ffaa00")
         elif sym.lower() == "q":
             self._quit()
 
@@ -504,6 +534,26 @@ class X80HUDApp:
         elif action == "home_rst":
             self.position_tracker.reset_home()
             self._set_status("HOME POSITION RESET", "#00ff41")
+        elif action == "timelapse":
+            self.timelapse_active = not self.timelapse_active
+            if self.timelapse_active:
+                self.timelapse_count = 0
+                self.timelapse_last_photo = 0
+                self._set_status("TIMELAPSE STARTED", "#00ff41")
+            else:
+                self._set_status(f"TIMELAPSE STOPPED [{self.timelapse_count} photos]", "#ffaa00")
+        elif action == "indoor":
+            self.indoor_mode = not self.indoor_mode
+            mode = "ON" if self.indoor_mode else "OFF"
+            if self.indoor_mode:
+                self.drone.set_speed(0.2)
+            self._set_status(f"INDOOR MODE {mode}", "#00d4ff" if self.indoor_mode else "#ffaa00")
+        elif action == "takeoff":
+            self.drone.takeoff()
+            self._set_status("TAKEOFF", "#00ff41")
+        elif action == "land":
+            self.drone.land()
+            self._set_status("LANDING", "#ffaa00")
 
     # ── Control Update Loop ───────────────────────────────────────────
 
@@ -564,6 +614,21 @@ class X80HUDApp:
             if not self.status_text or "GEOFENCE" not in self.status_text:
                 self._set_status("GEOFENCE WARNING — APPROACHING LIMIT", "#ffaa00", 2)
 
+        # Timelapse
+        if self.timelapse_active and self.last_jpeg:
+            now = time.time()
+            interval = self.config.timelapse_interval if hasattr(self.config, 'timelapse_interval') else 5.0
+            if now - self.timelapse_last_photo >= interval:
+                self.timelapse_last_photo = now
+                self.timelapse_count += 1
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                path = os.path.join(self.photo_dir, f"timelapse_{ts}_{self.timelapse_count:04d}.jpg")
+                try:
+                    with open(path, "wb") as f:
+                        f.write(self.last_jpeg)
+                except Exception:
+                    pass
+
         # Log
         if self.logger.logging:
             self.logger.log(self.drone.telemetry, self.drone.flight_state,
@@ -617,6 +682,11 @@ class X80HUDApp:
             self.stick_state["roll"] = 80
         else:
             self.stick_state["roll"] = 0
+
+        # Indoor mode throttle cap
+        if self.indoor_mode:
+            cap = self.config.hover_throttle_cap
+            self.stick_state["throttle"] = max(-cap, min(cap, self.stick_state["throttle"]))
 
     # ── Render Loop ───────────────────────────────────────────────────
 
@@ -739,6 +809,10 @@ class X80HUDApp:
                 "geofence_radius": self.config.geofence_radius,
                 "show_minimap": self.config.show_minimap,
                 "show_hud_buttons": self.config.show_hud_buttons,
+                "timelapse_active": self.timelapse_active,
+                "timelapse_count": self.timelapse_count,
+                "indoor_mode": self.indoor_mode,
+                "hover_throttle_cap": self.config.hover_throttle_cap,
             }
 
             frame = self.hud.render(frame, telemetry_dict, flight_state_dict, app_state)

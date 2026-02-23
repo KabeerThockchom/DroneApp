@@ -95,6 +95,11 @@ class HUDRenderer:
         # Mode indicators
         self._draw_mode_indicators(draw, w, h, flight_state)
 
+        # Indoor mode indicator
+        if app_state.get("indoor_mode", False):
+            cap = app_state.get("hover_throttle_cap", 30)
+            draw.text((20, 80), f"INDOOR [{cap:.0f}%]", fill=self.warning_color, font=self.font_medium)
+
         # Packet counter
         self._draw_packet_counter(draw, w, h,
                                    app_state.get("tx", 0),
@@ -104,6 +109,12 @@ class HUDRenderer:
         if app_state.get("recording", False):
             self._draw_recording_indicator(draw, w, h,
                                             app_state.get("recording_duration", 0))
+
+        # Timelapse indicator
+        if app_state.get("timelapse_active", False):
+            tl_count = app_state.get("timelapse_count", 0)
+            draw.text((w // 2 - 60, h // 10 + 25), f"TL: {tl_count} PHOTOS",
+                      fill=self.primary_color, font=self.font_medium)
 
         # Autopilot indicator
         if app_state.get("autopilot_active", False):
@@ -406,6 +417,10 @@ class HUDRenderer:
             ("CAM UP", "cam_up"),
             ("CAM DN", "cam_dn"),
             ("HOME RST", "home_rst"),
+            ("TIMELAPSE", "timelapse"),
+            ("INDOOR", "indoor"),
+            ("TAKEOFF", "takeoff"),
+            ("LAND", "land"),
         ]
 
         for i, (label, action) in enumerate(buttons):
@@ -597,6 +612,10 @@ class HUDRenderer:
             ("V", "Toggle Video"),
             ("P", "Take Photo"),
             ("R", "Record Video"),
+            ("B", "Switch Camera"),
+            ("G", "Rotate Camera 180"),
+            ("Y", "Toggle Timelapse"),
+            ("I", "Toggle Indoor Mode"),
             ("Tab", "Toggle HUD"),
             ("F11", "Fullscreen"),
             ("Q", "Quit"),

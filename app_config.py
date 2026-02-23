@@ -30,6 +30,9 @@ class AppConfig:
     max_drone_speed: float = 5.0
     show_minimap: bool = True
     show_hud_buttons: bool = True
+    indoor_mode: bool = True
+    hover_throttle_cap: float = 30.0   # max throttle % in indoor mode
+    timelapse_interval: float = 5.0    # seconds between timelapse photos
 
     def save(self, file_path: str = "config.json") -> None:
         """Saves the current configuration to a JSON file."""
@@ -91,6 +94,10 @@ KEYBOARD_MAP: Dict[str, List[Tuple[str, str]]] = {
         ("H", "Toggle Headless Mode"),
         ("F", "Toggle Lights"),
         ("Tab", "Toggle HUD Display"),
+        ("I", "Toggle Indoor Mode"),
+        ("B", "Switch Camera (Front/Bottom)"),
+        ("G", "Rotate Camera 180°"),
+        ("Y", "Toggle Timelapse"),
         ("?", "Show Help / Keyboard Map"),
         ("Q", "Quit Application"),
         ("F11", "Toggle Fullscreen")

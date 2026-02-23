@@ -83,6 +83,7 @@ class DroneProtocol:
         self._video_frames: Dict[int, Dict[int, bytes]] = {}
         self._last_yaw_time = time.time()
         self._start_time = 0
+        self._command_timers: Dict[str, float] = {}
 
     def connect(self):
         '''Establishes UDP connection and starts communication loops.'''
@@ -177,10 +178,27 @@ class DroneProtocol:
         packet[19] = CONTROL_TAIL
         return bytes(packet)
 
+    def _clear_expired_commands(self):
+        '''Auto-clear one-shot command flags after ~1 second.'''
+        now = time.time()
+        flag_map = {
+            'takeoff': 'takeoff',
+            'landing': 'landing',
+            'emergency_stop': 'emergency_stop',
+            'calibration': 'calibration',
+            'flip': 'flip',
+        }
+        for timer_key, state_attr in flag_map.items():
+            if timer_key in self._command_timers:
+                if now - self._command_timers[timer_key] > 1.0:
+                    setattr(self.flight_state, state_attr, False)
+                    del self._command_timers[timer_key]
+
     def _control_loop(self):
         while not self._stop_event.is_set():
             if self.control_socket:
                 try:
+                    self._clear_expired_commands()
                     packet = self._build_control_packet()
                     self.control_socket.sendto(packet, (DRONE_IP, CONTROL_PORT))
                     self._update_heading()
@@ -199,34 +217,97 @@ class DroneProtocol:
             time.sleep(HEARTBEAT_INTERVAL)
 
     def _receive_loop(self):
-        # This is a placeholder for telemetry parsing. The XR872 spec is incomplete on this.
-        # In a real scenario, we would parse telemetry packets here.
+        buf = bytearray()
         while not self._stop_event.is_set():
             try:
                 if self.control_socket:
                     data, _ = self.control_socket.recvfrom(1024)
-                    # Assuming a simple key-value string format for now
-                    # e.g., "bat:80;alt:10;spd_x:2;..."
-                    self._parse_telemetry(data)
-            except (socket.error, BlockingIOError) as e:
-                if isinstance(e, socket.error) and e.winerror == 10054:
-                    pass # Ignore connection reset by peer on Windows
+                    buf.extend(data)
+                    # Process all complete packets in the buffer
+                    while len(buf) >= 10:
+                        # Look for 0x66 header
+                        header_idx = -1
+                        for i in range(len(buf)):
+                            if buf[i] == 0x66:
+                                header_idx = i
+                                break
+                        if header_idx == -1:
+                            buf.clear()
+                            break
+                        # Discard bytes before header
+                        if header_idx > 0:
+                            del buf[:header_idx]
+                        # Try Format 2 (15 bytes): 0x66, 0x0F, ..., 0x99
+                        if len(buf) >= 15 and buf[1] == 0x0F and buf[14] == 0x99:
+                            self._parse_telemetry_format2(bytes(buf[:15]))
+                            del buf[:15]
+                            continue
+                        # Try Format 1 (10 bytes): 0x66, voltage (not 0x0F), ...
+                        if len(buf) >= 10 and buf[1] != 0x0F:
+                            self._parse_telemetry_format1(bytes(buf[:10]))
+                            del buf[:10]
+                            continue
+                        # Not enough data yet for either format; wait for more
+                        if len(buf) < 15:
+                            break
+                        # Unrecognized — skip this header byte and try again
+                        del buf[:1]
+            except OSError as e:
+                # On Windows, ICMP port unreachable raises winerror 10054
+                if platform.system() == "Windows" and getattr(e, 'winerror', None) == 10054:
+                    pass
                 else:
                     if self.on_status: self.on_status(f"Receive loop error: {e}")
                     time.sleep(1)
 
-    def _parse_telemetry(self, data: bytes):
+    def _parse_telemetry_format1(self, data: bytes):
+        '''Parse 10-byte telemetry packet (Format 1).'''
         try:
-            # This is a mock parser. Replace with actual protocol parsing.
-            parts = data.decode('utf-8').strip().split(';')
-            for part in parts:
-                key, value = part.split(':')
-                if key == 'bat': self.telemetry.battery_pct = int(value)
-                elif key == 'alt': self.telemetry.altitude = int(value)
+            # Verify checksum: XOR of bytes 1-8 should equal byte 9
+            checksum = 0
+            for i in range(1, 9):
+                checksum ^= data[i]
+            if checksum != data[9]:
+                return
+
+            voltage_raw = data[1]
+            voltage = voltage_raw / 10.0
+            battery_pct = int((voltage * 160.7142) - 517.8571)
+            battery_pct = max(0, min(100, battery_pct))
+
+            status_flags = data[2]
+            # bit 0: take photo, bit 1: record (informational, not stored yet)
+
+            self.telemetry.battery_voltage = voltage
+            self.telemetry.battery_pct = battery_pct
             self.telemetry.last_update = time.time()
-            if self.on_telemetry: self.on_telemetry(self.telemetry)
+            if self.on_telemetry:
+                self.on_telemetry(self.telemetry)
         except Exception:
-            pass # Ignore malformed packets
+            pass
+
+    def _parse_telemetry_format2(self, data: bytes):
+        '''Parse 15-byte telemetry packet (Format 2).'''
+        try:
+            # Verify checksum: XOR of bytes 2-12 should equal byte 13
+            checksum = 0
+            for i in range(2, 13):
+                checksum ^= data[i]
+            if checksum != data[13]:
+                return
+
+            battery_pct = data[3]
+            battery_pct = max(0, min(100, battery_pct))
+
+            status_flags = data[4]
+            # bit 1: photo, bit 2: record (informational)
+
+            self.telemetry.battery_pct = battery_pct
+            self.telemetry.last_update = time.time()
+            if self.on_telemetry:
+                self.on_telemetry(self.telemetry)
+        except Exception:
+            pass
 
     def _video_loop(self):
         while not self._stop_event.is_set():
@@ -244,9 +325,9 @@ class DroneProtocol:
 
                         if is_last == 1:
                             self._reassemble_frame(frame_id)
-            except (socket.error, BlockingIOError) as e:
-                if isinstance(e, socket.error) and e.winerror == 10054:
-                    pass # Ignore connection reset by peer on Windows
+            except OSError as e:
+                if platform.system() == "Windows" and getattr(e, 'winerror', None) == 10054:
+                    pass  # Ignore connection reset by peer on Windows
                 else:
                     if self.on_status: self.on_status(f"Video loop error: {e}")
                     time.sleep(1)
@@ -293,11 +374,25 @@ class DroneProtocol:
                 if self.on_status: self.on_status(f"Command send error: {e}")
 
     # --- Public Flight Commands ---
-    def takeoff(self): self.flight_state.takeoff = True
-    def land(self): self.flight_state.landing = True
-    def emergency_stop(self): self.flight_state.emergency_stop = True
-    def calibrate(self): self.flight_state.calibration = True
-    def flip(self): self.flight_state.flip = True
+    def takeoff(self):
+        self.flight_state.takeoff = True
+        self._command_timers['takeoff'] = time.time()
+
+    def land(self):
+        self.flight_state.landing = True
+        self._command_timers['landing'] = time.time()
+
+    def emergency_stop(self):
+        self.flight_state.emergency_stop = True
+        self._command_timers['emergency_stop'] = time.time()
+
+    def calibrate(self):
+        self.flight_state.calibration = True
+        self._command_timers['calibration'] = time.time()
+
+    def flip(self):
+        self.flight_state.flip = True
+        self._command_timers['flip'] = time.time()
     def toggle_light(self): self.flight_state.light = not self.flight_state.light
     def toggle_headless(self): self.flight_state.headless = not self.flight_state.headless
     def set_speed(self, level: float): self.flight_state.speed = max(0.0, min(1.0, level))
@@ -309,7 +404,21 @@ class DroneProtocol:
     def camera_up(self): self.flight_state.cam_up = True; self.flight_state.cam_down = False
     def camera_down(self): self.flight_state.cam_down = True; self.flight_state.cam_up = False
     def camera_stop(self): self.flight_state.cam_up = False; self.flight_state.cam_down = False
-    def switch_camera(self): pass # Protocol for this is not defined in the spec
+
+    def switch_camera(self):
+        self.send_cmd(b'\xcc\x5a\x01\x04\x02\x00\x07')
+        self.send_cmd(b'\xcc\x5a\x02\x04\x02\x00\x04')
+        self.send_cmd(b'\xcc\x5a\x03\x04\x02\x00\x05')
+
+    def camera_rotate(self, on: bool = True):
+        if on:
+            self.send_cmd(b'\xcc\x5a\x01\x01\x02\x01\x03')
+            self.send_cmd(b'\xcc\x5a\x02\x01\x02\x01\x00')
+            self.send_cmd(b'\xcc\x5a\x03\x01\x02\x01\x01')
+        else:
+            self.send_cmd(b'\xcc\x5a\x01\x01\x02\x00\x02')
+            self.send_cmd(b'\xcc\x5a\x02\x01\x02\x00\x01')
+            self.send_cmd(b'\xcc\x5a\x03\x01\x02\x00\x00')
 
     @property
     def uptime(self) -> float:
