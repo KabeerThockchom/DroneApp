@@ -38,6 +38,8 @@ from app_config import AppConfig, KEYBOARD_MAP, STICK_LAYOUT
 
 # Try importing pygame for gamepad
 try:
+    import os
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
     import pygame
     PYGAME_AVAILABLE = True
 except ImportError:

@@ -16,7 +16,7 @@ pip install Pillow
 pip install pygame
 
 # Run
-python x80_hud_app.py
+python3 x80_hud_app.py
 ```
 
 1. Power on the drone
