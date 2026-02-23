@@ -291,6 +291,7 @@ class X80HUDApp:
         self.status_color = "#00d4ff"
         self.status_clear_time = 0
         self.photo_count = 0
+        self._reconnecting = False
 
         # Timelapse state
         self.timelapse_active = False
@@ -422,6 +423,9 @@ class X80HUDApp:
         if ctrl_held and sym.lower() == "f":
             self._toggle_fullscreen()
             return
+        if ctrl_held and sym.lower() == "r":
+            self._reconnect()
+            return
 
         # One-shot commands
         if sym.lower() == "t":
@@ -510,6 +514,28 @@ class X80HUDApp:
         elif sym in ("Prior", "Next", "comma", "period"):
             self.drone.camera_stop()
 
+    # ── Reconnect ──────────────────────────────────────────────────────
+
+    def _reconnect(self):
+        """Manual reconnect — Ctrl+R or after crash."""
+        if self._reconnecting:
+            return
+        self._reconnecting = True
+        self._set_status("RECONNECTING...", "#ffaa00", 0)
+
+        def do_reconnect():
+            try:
+                self.drone.reconnect()
+                self.root.after(100, lambda: self._set_status("RECONNECTED", "#00ff41"))
+                self.root.after(200, self._start_video)
+            except Exception as e:
+                self.root.after(100, lambda: self._set_status(
+                    f"RECONNECT FAILED: {e}", "#ff0033", 5))
+            finally:
+                self._reconnecting = False
+
+        threading.Thread(target=do_reconnect, daemon=True).start()
+
     # ── Mouse Click Handling ─────────────────────────────────────────
 
     def _on_mouse_click(self, event):
@@ -563,6 +589,13 @@ class X80HUDApp:
     def _update_loop(self):
         """50Hz loop: process input, update drone controls, log data."""
         if not self.drone.is_connected:
+            # Auto-reconnect attempt every 5 seconds
+            if not self._reconnecting:
+                if not hasattr(self, '_last_reconnect_attempt'):
+                    self._last_reconnect_attempt = 0
+                if time.time() - self._last_reconnect_attempt > 5.0:
+                    self._last_reconnect_attempt = time.time()
+                    self._reconnect()
             self.root.after(50, self._update_loop)
             return
 

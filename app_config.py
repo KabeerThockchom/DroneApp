@@ -100,7 +100,8 @@ KEYBOARD_MAP: Dict[str, List[Tuple[str, str]]] = {
         ("Y", "Toggle Timelapse"),
         ("?", "Show Help / Keyboard Map"),
         ("Q", "Quit Application"),
-        ("F11 / Ctrl+F", "Toggle Fullscreen")
+        ("F11 / Ctrl+F", "Toggle Fullscreen"),
+        ("Ctrl+R", "Reconnect to Drone")
     ],
     "Position": [
         ("Home / N", "Reset Home Position"),

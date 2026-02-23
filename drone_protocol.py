@@ -84,6 +84,10 @@ class DroneProtocol:
         self._last_yaw_time = time.time()
         self._start_time = 0
         self._command_timers: Dict[str, float] = {}
+        self._last_video_time = 0.0
+        self._send_errors = 0
+        self.packets_sent = 0
+        self.packets_received = 0
 
     def connect(self):
         '''Establishes UDP connection and starts communication loops.'''
@@ -138,6 +142,30 @@ class DroneProtocol:
 
         self.is_connected = False
         if self.on_status: self.on_status("Connection closed.")
+
+    def reconnect(self):
+        '''Tear down and re-establish connection.'''
+        # Stop all threads
+        self._stop_event.set()
+        for t in self._threads:
+            t.join(timeout=1.0)
+
+        # Close sockets
+        for sock in (self.control_socket, self.video_socket):
+            if sock:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+        self.control_socket = None
+        self.video_socket = None
+        self.is_connected = False
+        self._send_errors = 0
+        self._video_frames.clear()
+
+        # Re-connect
+        time.sleep(0.5)
+        self.connect()
 
     def _build_control_packet(self) -> bytes:
         packet = bytearray(CONTROL_LEN)
@@ -202,9 +230,11 @@ class DroneProtocol:
                     packet = self._build_control_packet()
                     self.control_socket.sendto(packet, (DRONE_IP, CONTROL_PORT))
                     self._update_heading()
-                except socket.error as e:
-                    if self.on_status: self.on_status(f"Control loop error: {e}")
-                    time.sleep(1)
+                    self.packets_sent += 1
+                    self._send_errors = 0
+                except socket.error:
+                    self._send_errors += 1
+                    time.sleep(0.5)
             time.sleep(CONTROL_INTERVAL)
 
     def _heartbeat_loop(self):
@@ -212,8 +242,8 @@ class DroneProtocol:
             if self.control_socket:
                 try:
                     self.control_socket.sendto(HEARTBEAT_PACKET, (DRONE_IP, CONTROL_PORT))
-                except socket.error as e:
-                    if self.on_status: self.on_status(f"Heartbeat error: {e}")
+                except socket.error:
+                    pass  # Errors tracked by watchdog, don't spam status
             time.sleep(HEARTBEAT_INTERVAL)
 
     def _receive_loop(self):
@@ -253,12 +283,10 @@ class DroneProtocol:
                         # Unrecognized — skip this header byte and try again
                         del buf[:1]
             except OSError as e:
-                # On Windows, ICMP port unreachable raises winerror 10054
                 if platform.system() == "Windows" and getattr(e, 'winerror', None) == 10054:
                     pass
                 else:
-                    if self.on_status: self.on_status(f"Receive loop error: {e}")
-                    time.sleep(1)
+                    time.sleep(1)  # Back off on errors, don't spam status
 
     def _parse_telemetry_format1(self, data: bytes):
         '''Parse 10-byte telemetry packet (Format 1).'''
@@ -314,6 +342,7 @@ class DroneProtocol:
             try:
                 if self.video_socket:
                     data, _ = self.video_socket.recvfrom(65536)
+                    self.packets_received += 1
                     if len(data) > 4:
                         frame_id = data[0]
                         is_last = data[1]
@@ -324,13 +353,13 @@ class DroneProtocol:
                         self._video_frames[frame_id][packet_num] = payload
 
                         if is_last == 1:
+                            self._last_video_time = time.time()
                             self._reassemble_frame(frame_id)
             except OSError as e:
                 if platform.system() == "Windows" and getattr(e, 'winerror', None) == 10054:
-                    pass  # Ignore connection reset by peer on Windows
+                    pass
                 else:
-                    if self.on_status: self.on_status(f"Video loop error: {e}")
-                    time.sleep(1)
+                    time.sleep(1)  # Back off on errors, don't spam status
 
     def _reassemble_frame(self, frame_id: int):
         if frame_id not in self._video_frames: return
@@ -351,11 +380,28 @@ class DroneProtocol:
             if fid < frame_id: del self._video_frames[fid]
 
     def _watchdog_loop(self):
+        _warned = False
         while not self._stop_event.is_set():
-            if self.is_connected and (time.time() - self.telemetry.last_update > 5.0):
-                if self.on_status: self.on_status("Connection may be lost (no telemetry).")
-                # Consider attempting a reconnect here
-            time.sleep(5.0)
+            if self.is_connected:
+                no_telemetry = (self.telemetry.last_update > 0 and
+                                time.time() - self.telemetry.last_update > 5.0)
+                no_video = (self._last_video_time > 0 and
+                            time.time() - self._last_video_time > 5.0)
+                send_failing = self._send_errors > 10
+
+                if (no_telemetry or no_video) and send_failing:
+                    # Sustained connection loss — mark disconnected
+                    self.is_connected = False
+                    if self.on_status:
+                        self.on_status("CONNECTION LOST")
+                    _warned = False
+                elif (no_telemetry or no_video) and not _warned:
+                    if self.on_status:
+                        self.on_status("CONNECTION UNSTABLE")
+                    _warned = True
+                elif not no_telemetry and not no_video:
+                    _warned = False
+            time.sleep(3.0)
 
     def _update_heading(self):
         now = time.time()

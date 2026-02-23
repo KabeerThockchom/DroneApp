@@ -621,6 +621,7 @@ class HUDRenderer:
             ("Y", "Toggle Timelapse"),
             ("Tab", "Toggle HUD"),
             ("Ctrl+F", "Fullscreen"),
+            ("Ctrl+R", "Reconnect"),
             ("Q", "Quit"),
         ]
 
@@ -649,12 +650,16 @@ class HUDRenderer:
     # ── Disconnected Warning ──────────────────────────────────────────
 
     def _draw_disconnected(self, draw, w, h):
-        """Pulsing disconnected warning."""
-        pulse = int(time.time() * 2) % 2 == 0
-        if pulse:
-            tw, th = self._text_size(self.font_xl, "DISCONNECTED")
-            x = (w - tw) // 2
-            y = h // 3
-            draw.rectangle([(x - 20, y - 10), (x + tw + 20, y + th + 10)],
-                           fill=(0, 0, 0, 200))
-            draw.text((x, y), "DISCONNECTED", fill=self.danger_color, font=self.font_xl)
+        """Disconnected warning with reconnect hint — steady, not pulsing."""
+        # Main label
+        tw, th = self._text_size(self.font_xl, "CONNECTION LOST")
+        x = (w - tw) // 2
+        y = h // 3
+        draw.rectangle([(x - 20, y - 10), (x + tw + 20, y + th + 35)],
+                       fill=(0, 0, 0, 220))
+        draw.text((x, y), "CONNECTION LOST", fill=self.danger_color, font=self.font_xl)
+        # Hint
+        hint = "Auto-reconnecting... (Ctrl+R to force)"
+        hw, _ = self._text_size(self.font_small, hint)
+        draw.text(((w - hw) // 2, y + th + 10), hint,
+                  fill=self.warning_color, font=self.font_small)
